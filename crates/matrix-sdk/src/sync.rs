@@ -163,6 +163,14 @@ impl Client {
         #[cfg(feature = "e2e-encryption")]
         self.encryption().backups().maybe_trigger_backup();
 
+        // The Event Cache now receives the room updates.
+        // In 0.19 the event cache handles updates only once subscribed: before
+        // this backport, its listening task only existed after a subscription.
+        if self.event_cache().has_subscribed() {
+            Box::pin(self.event_cache().handle_room_updates(response.rooms.clone())).await?;
+        }
+
+        // Finally, let's call the sync response handler.
         self.call_sync_response_handlers(&response).await?;
 
         Ok(response)
