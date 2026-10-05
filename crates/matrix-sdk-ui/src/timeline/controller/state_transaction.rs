@@ -391,11 +391,7 @@ impl<'a, P: RoomDataProvider> TimelineStateTransaction<'a, P> {
                         // showcases this. The event cache fires out the `Set` with an index of 7,
                         // but the timeline with the PinnedEvents focus has only 4 items.
                         //
-                        // This hackjob continues in the `handle_remote_aggregation()` method as we
-                        // can't just handle any `TimelineAction::AddItem` due to:
-                        //  https://github.com/matrix-org/matrix-rust-sdk/pull/4645
-                        //
-                        // Doing so breaks the `test_new_pinned_events_are_not_added_on_sync` test.
+                        // This hackjob continues in the `handle_remote_aggregation()`.
                         //
                         // Relevant issue: https://github.com/matrix-org/matrix-rust-sdk/issues/5954.
                         self.handle_remote_aggregation(
