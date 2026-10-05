@@ -153,6 +153,15 @@ impl Client {
             .await?;
 
         tracing::debug!("done processing on base_client");
+
+        // The Event Cache now receives the room updates.
+        // In 0.18 the event cache handles updates only once subscribed: before
+        // this backport, its listening task only existed after a subscription.
+        if self.event_cache().has_subscribed() {
+            Box::pin(self.event_cache().handle_room_updates(response.rooms.clone())).await?;
+        }
+
+        // Finally, let's call the sync response handler.
         self.call_sync_response_handlers(&response).await?;
 
         Ok(response)
@@ -262,6 +271,14 @@ impl SlidingSyncResponseProcessor {
 
         response.to_device.extend(self.to_device_events);
 
+        // The Event Cache now receives the room updates.
+        // In 0.18 the event cache handles updates only once subscribed: before
+        // this backport, its listening task only existed after a subscription.
+        if self.client.event_cache().has_subscribed() {
+            Box::pin(self.client.event_cache().handle_room_updates(response.rooms.clone())).await?;
+        }
+
+        // Finally, let's call the sync response handler.
         self.client.call_sync_response_handlers(&response).await?;
 
         Ok(response)
