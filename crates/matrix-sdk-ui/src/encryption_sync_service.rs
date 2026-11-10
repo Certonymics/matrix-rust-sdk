@@ -299,6 +299,10 @@ impl EncryptionSyncService {
     pub(crate) async fn expire_sync_session(&self) {
         self.sliding_sync.expire_session().await;
     }
+
+    pub(crate) async fn wait_for_in_flight_response(&self) {
+        self.sliding_sync.wait_for_in_flight_response().await;
+    }
 }
 
 /// Errors for the [`EncryptionSyncService`].

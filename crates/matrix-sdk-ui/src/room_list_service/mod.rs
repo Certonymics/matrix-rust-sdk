@@ -390,6 +390,10 @@ impl RoomListService {
         }
     }
 
+    pub(crate) async fn wait_for_in_flight_response(&self) {
+        self.sliding_sync.wait_for_in_flight_response().await;
+    }
+
     /// Get a [`Stream`] of [`SyncIndicator`].
     ///
     /// Read the documentation of [`SyncIndicator`] to learn more about it.
