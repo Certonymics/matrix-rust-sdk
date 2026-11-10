@@ -19,6 +19,7 @@ mod notification_client;
 mod room_list_service;
 mod sliding_sync;
 mod sync_service;
+mod sync_service_pause;
 mod timeline;
 
 matrix_sdk_test_utils::init_tracing_for_tests!();

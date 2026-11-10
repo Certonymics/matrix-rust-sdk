@@ -4133,6 +4133,7 @@ dependencies = [
  "assert_matches2",
  "async-rx",
  "async-stream",
+ "async-trait",
  "async_cell",
  "bitflags 2.13.2",
  "chrono",
