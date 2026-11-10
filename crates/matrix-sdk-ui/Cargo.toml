@@ -63,6 +63,7 @@ unicode-segmentation.workspace = true
 uniffi = { workspace = true, optional = true }
 
 [dev-dependencies]
+async-trait.workspace = true
 anyhow.workspace = true
 assert-json-diff.workspace = true
 assert_matches.workspace = true
