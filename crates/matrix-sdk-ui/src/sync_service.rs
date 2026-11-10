@@ -310,6 +310,13 @@ impl SyncTaskSupervisor {
                     error!("when awaiting encryption sync: {err:#}");
                 }
 
+                // Both sync loops have ended, but a response they had already received may
+                // still be handled in a detached task. Wait for it, so that its writes to the
+                // stores are done by the time the state below is set and `SyncService::stop`
+                // returns.
+                room_list_service.wait_for_in_flight_response().await;
+                encryption_sync.wait_for_in_flight_response().await;
+
                 if let Some(error) = report.error {
                     if offline_mode {
                         state.set(State::Offline);

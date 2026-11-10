@@ -772,6 +772,20 @@ impl SlidingSync {
         Ok(self.inner.internal_channel_send(SlidingSyncInternalMessage::SyncLoopStop)?)
     }
 
+    /// Wait until no request or response is in flight for this sliding sync.
+    ///
+    /// Stopping the sync loop ([`Self::sync`]) drops a request that is still
+    /// waiting for its response, but a response that has already been
+    /// received keeps being handled in a task that cannot be cancelled.
+    /// Since a stopped sync loop doesn't start a new request, calling this
+    /// method once the sync loop has ended ensures that such a response has
+    /// been fully handled, and its effects written to the stores.
+    pub async fn wait_for_in_flight_response(&self) {
+        // The `position` lock is held from the moment a request is generated until
+        // its response has been handled.
+        drop(self.inner.position.lock().await);
+    }
+
     /// Expire the current Sliding Sync session on the client-side.
     ///
     /// Expiring a Sliding Sync session means: resetting `pos`.
