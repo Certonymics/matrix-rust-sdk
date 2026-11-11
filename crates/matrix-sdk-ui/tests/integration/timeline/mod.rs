@@ -405,6 +405,57 @@ async fn test_redacted_message() {
     assert_pending!(timeline_stream);
 }
 
+/// The aggregation that redacts an item drops its JSON; the event cache's
+/// redacted copy, which follows, carries `unsigned.redacted_because`, the only
+/// place that names who redacted the event, and the item takes it.
+#[async_test]
+async fn test_a_redacted_item_takes_the_caches_redacted_json() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+
+    let room_id = room_id!("!a98sd12bjh:example.org");
+    let room = server.sync_joined_room(&client, room_id).await;
+
+    server.mock_room_state_encryption().plain().mount().await;
+
+    let timeline = room.timeline().await.unwrap();
+
+    let event_id = event_id!("$message");
+    let f = EventFactory::new();
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_timeline_event(f.text_msg("hi").sender(&BOB).event_id(event_id)),
+        )
+        .await;
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id).add_timeline_event(
+                f.redaction(event_id).sender(&ALICE).event_id(event_id!("$redaction")),
+            ),
+        )
+        .await;
+
+    let redacted_because = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(item) = timeline.item_by_event_id(event_id).await
+                && item.content().is_redacted()
+                && let Some(json) = item.original_json()
+            {
+                return json.get_field::<serde_json::Value>("unsigned").unwrap().unwrap()
+                    ["redacted_because"]
+                    .clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the redacted item takes the cache's redacted JSON");
+    assert_eq!(redacted_because["sender"], ALICE.as_str());
+}
+
 #[async_test]
 async fn test_redact_message() {
     let server = MatrixMockServer::new().await;
@@ -454,7 +505,7 @@ async fn test_redact_message() {
     assert!(item.as_event().unwrap().content().is_redacted());
 
     assert_let_timeout!(Some(timeline_updates) = timeline_stream.next());
-    assert_eq!(timeline_updates.len(), 2);
+    assert_eq!(timeline_updates.len(), 3);
 
     // The redaction was sent, then its remote echo arrived.
     assert_let!(VectorDiff::Set { index: 1, value: item } = &timeline_updates[0]);
@@ -466,6 +517,12 @@ async fn test_redact_message() {
     let item = item.as_event().unwrap();
     assert!(item.content().is_redacted());
     assert_matches!(item.redaction_send_state(), None);
+
+    // The event cache's redacted copy followed, and the item took its JSON.
+    assert_let!(VectorDiff::Set { index: 1, value: item } = &timeline_updates[2]);
+    let item = item.as_event().unwrap();
+    assert!(item.content().is_redacted());
+    assert!(item.original_json().is_some());
 
     // Redacting a local event works.
     timeline
