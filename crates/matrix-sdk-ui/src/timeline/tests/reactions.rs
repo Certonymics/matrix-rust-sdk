@@ -397,6 +397,53 @@ async fn test_local_reaction_send_state_failed_then_sent() {
 }
 
 #[async_test]
+async fn test_reaction_info_carries_the_reaction_event_id() {
+    let timeline = TestTimeline::new().await;
+    let mut stream = timeline.subscribe_events().await;
+    let f = &timeline.factory;
+
+    let event_id = owned_event_id!("$1");
+    timeline.handle_live_event(f.text_msg("hello").sender(*ALICE).event_id(&event_id)).await;
+    assert_next_matches!(stream, VectorDiff::PushBack { .. });
+
+    // A reaction from the server carries its own id.
+    timeline
+        .handle_live_event(f.reaction(&event_id, "🎉").sender(*BOB).event_id(event_id!("$bob")))
+        .await;
+    let item = assert_next_matches!(stream, VectorDiff::Set { index: 0, value } => value);
+    let info = item.content().reactions().unwrap().get("🎉").unwrap().get(*BOB).unwrap();
+    assert_eq!(info.event_id.as_deref(), Some(event_id!("$bob")));
+
+    // A local echo has none until it is sent.
+    let txn_id = timeline
+        .handle_local_event(
+            ReactionEventContent::new(Annotation::new(event_id.clone(), "👍".to_owned())).into(),
+        )
+        .await;
+    let item = assert_next_matches!(stream, VectorDiff::Set { index: 0, value } => value);
+    let info = item.content().reactions().unwrap().get("👍").unwrap().get(*ALICE).unwrap();
+    assert_eq!(info.event_id, None);
+
+    let reaction_id = owned_event_id!("$r");
+    timeline
+        .controller
+        .update_event_send_state(&txn_id, EventSendState::Sent { event_id: reaction_id.clone() })
+        .await;
+    let item = assert_next_matches!(stream, VectorDiff::Set { index: 0, value } => value);
+    let info = item.content().reactions().unwrap().get("👍").unwrap().get(*ALICE).unwrap();
+    assert_eq!(info.event_id.as_ref(), Some(&reaction_id));
+
+    timeline
+        .handle_live_event(f.reaction(&event_id, "👍").sender(*ALICE).event_id(&reaction_id))
+        .await;
+    let item = assert_next_matches!(stream, VectorDiff::Set { index: 0, value } => value);
+    let info = item.content().reactions().unwrap().get("👍").unwrap().get(*ALICE).unwrap();
+    assert_eq!(info.event_id.as_ref(), Some(&reaction_id));
+
+    assert_pending!(stream);
+}
+
+#[async_test]
 async fn test_reaction_remote_echo_before_sent_leaves_no_pending_state() {
     let timeline = TestTimeline::new().await;
     let mut stream = timeline.subscribe_events().await;

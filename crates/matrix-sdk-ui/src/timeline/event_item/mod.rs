@@ -832,6 +832,10 @@ pub struct ReactionInfo {
     /// Send state of the reaction when it's one of our own local echoes;
     /// `None` when it came from the server.
     pub send_state: Option<EventSendState>,
+    /// The id of the reaction event itself (not the event it reacts to), once
+    /// it has one: always when it came from the server, and for one of our
+    /// local echoes once it has been sent. Removing a reaction redacts it.
+    pub event_id: Option<OwnedEventId>,
 }
 
 /// Reactions grouped by key first, then by sender.

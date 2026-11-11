@@ -285,6 +285,11 @@ impl Aggregation {
         !matches!(self.send_state, None | Some(EventSendState::Sent { .. }))
     }
 
+    /// The id of the reaction event itself, once it has one.
+    fn reaction_event_id(&self) -> Option<OwnedEventId> {
+        as_variant!(&self.own_id, TimelineEventItemId::EventId(event_id) => event_id.clone())
+    }
+
     /// Apply an aggregation in-place to a given [`TimelineItemContent`].
     ///
     /// In case of success, returns an enum indicating whether the applied
@@ -366,7 +371,11 @@ impl Aggregation {
 
                     reactions.entry(key.clone()).or_default().insert(
                         sender.clone(),
-                        ReactionInfo { timestamp: *timestamp, send_state: self.send_state.clone() },
+                        ReactionInfo {
+                            timestamp: *timestamp,
+                            send_state: self.send_state.clone(),
+                            event_id: self.reaction_event_id(),
+                        },
                     );
 
                     ApplyAggregationResult::UpdatedItem
@@ -535,6 +544,7 @@ impl Aggregation {
                     reactions.get_mut(key).and_then(|by_user| by_user.get_mut(sender))
                 {
                     info.send_state = self.send_state.clone();
+                    info.event_id = self.reaction_event_id();
                 }
                 true
             }
