@@ -211,6 +211,27 @@ async fn test_sync_service_state() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The supervisor can handle a stop before either sync loop has subscribed to
+/// its stop message; `stop` must still return.
+#[async_test]
+async fn test_sync_service_stop_right_after_start_returns() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+
+    let encryption_pos = Arc::new(Mutex::new(0));
+    let room_pos = Arc::new(Mutex::new(0));
+    let _guard = setup_mocking_sliding_sync_server(&server, encryption_pos, room_pos).await;
+
+    let sync_service = SyncService::builder(client).build().await.unwrap();
+
+    sync_service.start().await;
+    tokio::time::timeout(Duration::from_secs(5), sync_service.stop())
+        .await
+        .expect("stop must return although neither sync loop has started");
+    assert_matches!(sync_service.state().get(), State::Idle);
+    assert!(!sync_service.is_supervisor_running().await);
+}
+
 #[async_test]
 async fn test_sync_service_client_sync_presence_is_used_by_both_syncs() -> anyhow::Result<()> {
     let server = MatrixMockServer::new().await;

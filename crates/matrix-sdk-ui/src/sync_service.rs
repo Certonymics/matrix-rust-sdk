@@ -282,9 +282,14 @@ impl SyncTaskSupervisor {
                 // point they'll return `None` and will exit their infinite loops, and their
                 // tasks will gracefully terminate.
 
+                // A stop message reaches only a sync loop that is already running. A task
+                // that has not been polled yet subscribes to the loop's messages later and
+                // would never see it, so when nothing received the message, the task is
+                // aborted instead: dropping a sync loop stops it as well.
                 if stop_room_list {
                     if let Err(err) = room_list_service.stop_sync() {
                         warn!(?report, "unable to stop room list service: {err:#}");
+                        room_list_task.abort();
                     }
 
                     if report.has_expired() {
@@ -292,13 +297,16 @@ impl SyncTaskSupervisor {
                     }
                 }
 
-                if let Err(err) = room_list_task.await {
+                if let Err(err) = room_list_task.await
+                    && !err.is_cancelled()
+                {
                     error!("when awaiting room list service: {err:#}");
                 }
 
                 if stop_encryption {
                     if let Err(err) = encryption_sync.stop_sync() {
                         warn!(?report, "unable to stop encryption sync: {err:#}");
+                        encryption_sync_task.abort();
                     }
 
                     if report.has_expired() {
@@ -306,7 +314,9 @@ impl SyncTaskSupervisor {
                     }
                 }
 
-                if let Err(err) = encryption_sync_task.await {
+                if let Err(err) = encryption_sync_task.await
+                    && !err.is_cancelled()
+                {
                     error!("when awaiting encryption sync: {err:#}");
                 }
 
