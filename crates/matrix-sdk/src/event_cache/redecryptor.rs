@@ -1250,6 +1250,7 @@ mod tests {
     use assert_matches2::assert_matches;
     use async_trait::async_trait;
     use eyeball_im::VectorDiff;
+    use futures_util::future::join_all;
     use matrix_sdk_base::{
         cross_process_lock::CrossProcessLockGeneration,
         crypto::types::events::{ToDeviceEvent, room::encrypted::ToDeviceEncryptedEventContent},
@@ -1267,10 +1268,12 @@ mod tests {
         sleep::sleep,
         store::StoreConfig,
     };
-    use matrix_sdk_common::cross_process_lock::CrossProcessLockConfig;
-    use matrix_sdk_test::{JoinedRoomBuilder, async_test, event_factory::EventFactory};
+    use matrix_sdk_common::{cross_process_lock::CrossProcessLockConfig, executor::spawn};
+    use matrix_sdk_test::{
+        JoinedRoomBuilder, SyncResponseBuilder, async_test, event_factory::EventFactory,
+    };
     use ruma::{
-        EventId, OwnedEventId, RoomId, RoomVersionId, device_id, event_id,
+        EventId, OwnedEventId, OwnedRoomId, RoomId, RoomVersionId, device_id, event_id,
         events::{AnySyncTimelineEvent, relation::RelationType},
         room_id,
         serde::Raw,
@@ -1279,6 +1282,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::oneshot::{self, Sender};
     use tracing::{Instrument, info};
+    use wiremock::{Request, Respond, ResponseTemplate};
 
     use crate::{
         Client, assert_let_timeout,
@@ -1867,28 +1871,96 @@ mod tests {
         let (_, mut subscriber) = room_cache.subscribe().await.unwrap();
         let mut generic_stream = event_cache.subscribe_to_room_generic_updates();
 
-        // Let us forward the event to Bob.
-        matrix_mock_server
+        // Custom type to mock the `/sync` endpoints.
+        struct Responder {
+            sync_response_builder: Mutex<(usize, SyncResponseBuilder)>,
+            room_id: OwnedRoomId,
+            event: Raw<AnySyncTimelineEvent>,
+            room_key: Raw<ToDeviceEvent<ToDeviceEncryptedEventContent>>,
+        }
+
+        impl Respond for Responder {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let (nth_sync, sync_response_builder) = &mut *self.sync_response_builder.lock();
+
+                match nth_sync {
+                    // The first sync carries the event.
+                    0 => {
+                        *nth_sync = 1;
+                        ResponseTemplate::new(200).set_body_json(
+                            sync_response_builder
+                                .add_joined_room(
+                                    JoinedRoomBuilder::new(&self.room_id)
+                                        .add_timeline_event(self.event.clone()),
+                                )
+                                .build_json_sync_response(),
+                        )
+                    }
+
+                    // The second sync carries the room key.
+                    1 => {
+                        *nth_sync = 2;
+                        ResponseTemplate::new(200).set_body_json(
+                            sync_response_builder
+                                .add_to_device_event(self.room_key.deserialize_as().unwrap())
+                                .build_json_sync_response(),
+                        )
+                    }
+
+                    _ => panic!("`/sync` is called once too much"),
+                }
+            }
+        }
+
+        let mock = matrix_mock_server
             .mock_sync()
-            .ok_and_run(&bob, |builder| {
-                builder.add_joined_room(JoinedRoomBuilder::new(room_id).add_timeline_event(event));
+            .respond_with(Responder {
+                sync_response_builder: Mutex::new((0, SyncResponseBuilder::new())),
+                room_id: room_id.to_owned(),
+                event,
+                room_key,
             })
+            .mount_as_scoped()
             .await;
 
-        // Now we send the room key to Bob.
-        matrix_mock_server
-            .mock_sync()
-            .ok_and_run(&bob, |builder| {
-                builder.add_to_device_event(
-                    room_key
-                        .deserialize_as()
-                        .expect("We should be able to deserialize the room key"),
-                );
-            })
-            .await;
+        // The event cache handles a sync response inside the sync, so the sync
+        // carrying the event stops when the store delays its write. The room
+        // key arrives in a second sync while the first one is still blocked.
+        let sync_room = spawn({
+            let bob = bob.clone();
 
-        info!("Stopping the delay");
-        delayed_store.stop_delaying().await;
+            async move {
+                let _ = bob.sync_once(Default::default()).await.unwrap();
+            }
+        });
+
+        let sync_room_keys = spawn({
+            let bob = bob.clone();
+
+            async move {
+                // Wait on `sync_room` to hang.
+                sleep(Duration::from_secs(1)).await;
+
+                let _ = bob.sync_once(Default::default()).await.unwrap();
+
+                // Allow the redecryptor some time to retry any UTDs.
+                sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let delay = spawn(async move {
+            // Unblock `sync_room` once `sync_room_keys` has finished.
+            sleep(Duration::from_secs(2)).await;
+            info!("Stopping the delay");
+            delayed_store.stop_delaying().await;
+        });
+
+        assert!(
+            join_all([sync_room, sync_room_keys, delay]).await.into_iter().all(|res| res.is_ok()),
+            "all tasks should succeed"
+        );
+
+        drop(mock);
 
         // The first decryption attempt has failed because the first sync (the
         // one with the event) did not contain the room key. The decryptor has
