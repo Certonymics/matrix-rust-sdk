@@ -354,13 +354,24 @@ impl BackupMachine {
         if let RoomKeyBackupInfo::MegolmBackupV1Curve25519AesSha2(data) = backup_info {
             let canonical_json = data.to_canonical_json()?;
 
-            let private_identity = self.store.private_identity();
-            let identity = private_identity.lock().await;
-
-            if let Some(key_id) = identity.master_key_id().await
-                && let Ok(signature) = identity.sign(&canonical_json).await
+            // The private identity is released before the account is read:
+            // `OlmMachine::outgoing_requests` holds the account while
+            // `keys_for_upload` locks the private identity, so holding both
+            // here in the other order deadlocks a backup created while the
+            // device keys are first uploaded.
             {
-                data.signatures.add_signature(self.store.user_id().to_owned(), key_id, signature);
+                let private_identity = self.store.private_identity();
+                let identity = private_identity.lock().await;
+
+                if let Some(key_id) = identity.master_key_id().await
+                    && let Ok(signature) = identity.sign(&canonical_json).await
+                {
+                    data.signatures.add_signature(
+                        self.store.user_id().to_owned(),
+                        key_id,
+                        signature,
+                    );
+                }
             }
 
             let cache = self.store.cache().await?;
@@ -901,6 +912,36 @@ mod tests {
         let result = backup_machine.verify_backup(backup_info, false).await.unwrap();
 
         assert!(result.trusted());
+    }
+
+    /// `OlmMachine::outgoing_requests` holds the account while
+    /// `keys_for_upload` locks the private identity, so `sign_backup` must not
+    /// hold the private identity while it waits for the account.
+    #[async_test]
+    async fn test_sign_backup_releases_the_private_identity_before_reading_the_account() {
+        use std::time::Duration;
+
+        let machine = OlmMachine::new(alice_id(), alice_device_id()).await;
+        let store = machine.store().clone();
+        let cache = store.cache().await.unwrap();
+        let account = cache.account().await.unwrap();
+
+        let backup_machine = machine.backup_machine().clone();
+        let signing = tokio::spawn(async move {
+            let mut backup_info = BackupDecryptionKey::new().to_backup_info();
+            backup_machine.sign_backup(&mut backup_info).await
+        });
+        // The signing task runs until it waits for the account held above.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let private_identity = store.private_identity();
+        let identity = tokio::time::timeout(Duration::from_secs(5), private_identity.lock())
+            .await
+            .expect("sign_backup holds the private identity while it waits for the account");
+        drop(identity);
+        drop(account);
+        drop(cache);
+        signing.await.unwrap().unwrap();
     }
 
     #[async_test]
