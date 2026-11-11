@@ -585,6 +585,44 @@ impl EventCache {
             .await?;
         }
 
+        // Saving the resolved events doesn't notify the linked chunk update
+        // observers, so the search index would never see them: index them here,
+        // once the caches are released. Upstream sends them to the indexer's own
+        // channel (e5ddcfd2b), which 0.19 doesn't have.
+        #[cfg(feature = "experimental-search")]
+        {
+            let room_cache = all_caches.room.clone();
+            drop(all_caches);
+
+            let resolved: Vec<_> = maybe_resolved_events
+                .iter()
+                .filter_map(|resolved_event| resolved_event.as_resolved())
+                .cloned()
+                .collect();
+
+            if !resolved.is_empty()
+                && let Ok(client) = self.inner.client()
+                && let Some(room) = client.get_room(room_id)
+            {
+                let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
+
+                if let Err(err) = client
+                    .search_index()
+                    .lock()
+                    .await
+                    .bulk_handle_timeline_event(
+                        resolved.into_iter(),
+                        &room_cache,
+                        room_id,
+                        &redaction_rules,
+                    )
+                    .await
+                {
+                    warn!("Failed to index redecrypted events: {err}");
+                }
+            }
+        }
+
         let report =
             RedecryptorReport::ResolvedUtds { room_id: room_id.to_owned(), events: event_ids };
         let _ = self.inner.redecryption_channels.utd_reporter.send(report);
@@ -1707,6 +1745,57 @@ mod tests {
         );
         assert_eq!(expected_room_id, room_id);
         assert!(generic_stream.is_empty());
+    }
+
+    #[cfg(feature = "experimental-search")]
+    #[async_test]
+    async fn test_redecrypted_event_is_indexed() {
+        let room_id = room_id!("!test:localhost");
+
+        let event_factory = EventFactory::new().room(room_id);
+        let (alice, bob, matrix_mock_server, _) = set_up_clients(room_id, true, false).await;
+
+        let (event, room_key) =
+            prepare_room(&matrix_mock_server, &event_factory, &alice, &bob, room_id).await;
+
+        let (room_cache, _) = bob.event_cache().room(room_id).await.unwrap();
+        let (_, mut subscriber) = room_cache.subscribe().await.unwrap();
+
+        // Bob receives the event as a UTD, which can't be indexed.
+        matrix_mock_server
+            .mock_sync()
+            .ok_and_run(&bob, |builder| {
+                builder.add_joined_room(JoinedRoomBuilder::new(room_id).add_timeline_event(event));
+            })
+            .await;
+        assert_let_timeout!(Ok(RoomEventCacheUpdate::UpdateTimelineEvents(_)) = subscriber.recv());
+
+        let room = bob.get_room(room_id).unwrap();
+        assert!(room.search("secret", 5, None).await.unwrap().is_empty());
+
+        // Once the room key arrives, the event is redecrypted…
+        matrix_mock_server
+            .mock_sync()
+            .ok_and_run(&bob, |builder| {
+                builder.add_to_device_event(room_key.deserialize_as().unwrap());
+            })
+            .await;
+        assert_let_timeout!(
+            Duration::from_secs(1),
+            Ok(RoomEventCacheUpdate::UpdateTimelineEvents(_)) = subscriber.recv()
+        );
+
+        // … and indexed.
+        let mut results = Vec::new();
+        for _ in 0..50 {
+            results = room.search("secret", 5, None).await.unwrap();
+            if !results.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(results.len(), 1, "the redecrypted event should be indexed");
+        assert_eq!(results[0].1, event_id!("$some_id"));
     }
 
     #[async_test]
